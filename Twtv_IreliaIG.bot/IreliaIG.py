@@ -779,11 +779,11 @@ async def process_finished_match(bot, match_id, data, puuid):
         avg_damage = sum(p["totalDamageDealtToChampions"] for p in team_players) / len(team_players)
         avg_level = sum(p["champLevel"] for p in team_players) / len(team_players)
 
-            for p in team_players:
-                time_played = p.get("timePlayed", data["info"].get("gameDuration", 0))
-                if time_played < (data["info"].get("gameDuration", 0) * 0.5):
-                    afk_detectado = True
-                    break
+        for p in team_players:
+            time_played = p.get("timePlayed", data["info"].get("gameDuration", 0))
+            if time_played < (data["info"].get("gameDuration", 0) * 0.5):
+                afk_detectado = True
+                break
 
             condiciones = 0
             if p["goldEarned"] < (avg_gold * 0.35):
