@@ -74,7 +74,7 @@ def load_config():
         # Create default config
         config.add_section('RIOT')
         config.set('RIOT', 'api_key', 'RGAPI-8ca0fbb3-1bf4-498f-9669-5e35fbdf4072')
-        config.set('RIOT', 'game_name', 'estufa70'')
+        config.set('RIOT', 'game_name', 'estufa70')
         config.set('RIOT', 'tag_line', 'RPG')
         config.set('RIOT', 'region', 'europe')
 
