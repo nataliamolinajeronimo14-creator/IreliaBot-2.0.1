@@ -57,15 +57,15 @@ DEFAULT_STREAK_MESSAGES = {
     },
     "lose_streak": {
         "2": "💀 TILT ALERT 🔪",
-        "3": "💀 3 LOSSES... cuidado pikachuKnife",
-        "4": "💀 4 LOSSES... FF mental oops 🔪",
-        "5": "💀 5 LOSSES... desastre ShinBOW 🔪",
-        "6": "💀 6 LOSSES... se acabó classic 🔪",
-        "7": "💀 7 LOSSES... no es tu día classique 🔪",
-        "8": "💀 8 LOSSES... Hermano no te rindes? HAH 🔪",
-        "9": "💀 9 LOSSES... yo que tú leería un libro... XD 🔪",
-        "10": "💀 10 mega-LOSSES... Y todabía sigues xdding 🔪",
-        "11": "💀 11 LOSSES... no es tu día Oops 🔪",
+        "3": "💀 3 LOSSES... cuidado ",
+        "4": "💀 4 LOSSES... FF mental 🔪",
+        "5": "💀 5 LOSSES... desastre  🔪",
+        "6": "💀 6 LOSSES... se acabó  🔪",
+        "7": "💀 7 LOSSES... no es tu día 🔪",
+        "8": "💀 8 LOSSES... Hermano no te rindes? 🔪",
+        "9": "💀 9 LOSSES... yo que tú leería un libro... 🔪",
+        "10": "💀 10 mega-LOSSES... Y todabía sigues 🔪",
+        "11": "💀 11 LOSSES... no es tu día 🔪",
         "12+": "💀 {streak} LOSSES... APAGA Y VETE :0 🔪"
     }
 }
