@@ -30,65 +30,25 @@ config = configparser.ConfigParser()
 config_file = 'bot_config.ini'
 STREAK_MESSAGES_FILE = 'streak_messages.json'
 
-DEFAULT_STREAK_MESSAGES = {
-    "streak_break": {
-        "win_broken": "💀 Win streak of {streak} broken! 💀",
-        "lose_broken": "🔥 Lose streak of {streak} broken! 🔥"
-    },
-    "win_streak": {
-        "3": "🔥 ON FIRE (3W) 🔝",
-        "4": "🔥 4 WINS SEGUIDAS 🔝",
-        "5": "🔥 5 WINS (IMPARABLE) 🔝",
-        "6": "🔥 6 WINS WTF 🔝",
-        "7": "🔥 7 WINS (SMURF DETECTED) 🔝",
-        "8": "🔥 8 WINS (MONSTRUO) 🔝",
-        "9": "🔥 9 WINS (INHUMANO) 🔝",
-        "10": "🔥 10 WINS (DIOS) 🔝",
-        "11": "🔥 11 WINS (NO FALLA) 🔝",
-        "12": "🔥 12 WINS (MODO DIABLO) 🔝",
-        "13": "🔥 13 WINS (ESTÁ ROTO) 🔝",
-        "14": "🔥 14 WINS (NO ES NORMAL) 🔝",
-        "15": "🔥 15 WINS (DESTRUIDO) 🔝",
-        "16": "🔥 16 WINS (LOBBY DIFF) 🔝",
-        "17": "🔥 17 WINS (SIN SENTIDO) 🔝",
-        "18": "🔥 18 WINS (HACK?) 🔝",
-        "19": "🔥 19 WINS (ESTO ES ILEGAL) 🔝",
-        "20+": "🔥 {streak} WINS SEGUIDAS (LEYENDA) 🔝"
-    },
-    "lose_streak": {
-        "2": "💀 TILT ALERT 🔪",
-        "3": "💀 3 LOSSES... cuidado ",
-        "4": "💀 4 LOSSES... FF mental 🔪",
-        "5": "💀 5 LOSSES... desastre  🔪",
-        "6": "💀 6 LOSSES... se acabó  🔪",
-        "7": "💀 7 LOSSES... no es tu día 🔪",
-        "8": "💀 8 LOSSES... Hermano no te rindes? 🔪",
-        "9": "💀 9 LOSSES... yo que tú leería un libro... 🔪",
-        "10": "💀 10 mega-LOSSES... Y todabía sigues 🔪",
-        "11": "💀 11 LOSSES... no es tu día 🔪",
-        "12+": "💀 {streak} LOSSES... APAGA Y VETE :0 🔪"
-    }
-}
-
 def load_streak_messages():
-    """Load streak messages from external JSON, with fallback defaults."""
-    if os.path.exists(STREAK_MESSAGES_FILE):
-        try:
-            with open(STREAK_MESSAGES_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-            logger.warning(f"Invalid streak messages format in {STREAK_MESSAGES_FILE}, using defaults")
-        except Exception as e:
-            logger.warning(f"Could not load {STREAK_MESSAGES_FILE}: {e}, using defaults")
-    else:
-        try:
-            with open(STREAK_MESSAGES_FILE, 'w', encoding='utf-8') as f:
-                json.dump(DEFAULT_STREAK_MESSAGES, f, indent=2, ensure_ascii=False)
-            logger.info(f"Created default streak messages file: {STREAK_MESSAGES_FILE}")
-        except Exception as e:
-            logger.warning(f"Failed to create default {STREAK_MESSAGES_FILE}: {e}")
-    return DEFAULT_STREAK_MESSAGES
+    """Load streak messages from JSON file. This is the SINGLE source of truth for streak messages."""
+    if not os.path.exists(STREAK_MESSAGES_FILE):
+        logger.error(f"❌ {STREAK_MESSAGES_FILE} not found! Streak messages will not work.")
+        logger.error(f"   Create {STREAK_MESSAGES_FILE} with your custom streak messages.")
+        return {}
+    
+    try:
+        with open(STREAK_MESSAGES_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            logger.info(f"✅ Streak messages loaded from {STREAK_MESSAGES_FILE}")
+            return data
+        else:
+            logger.error(f"❌ {STREAK_MESSAGES_FILE} has invalid format (expected dict)")
+            return {}
+    except Exception as e:
+        logger.error(f"❌ Error loading {STREAK_MESSAGES_FILE}: {e}")
+        return {}
 
 
 def get_streak_message(mapping, streak):
@@ -2277,24 +2237,21 @@ class Bot(commands.Bot):
     async def today(self, ctx):
         if not can_use(ctx.author.name, "today"): return
         
-        puuid = PUUID or get_puuid()
-        if not puuid:
-            await ctx.send("❌ Cannot calculate - PUUID not available")
-            return
-        
-        stats = await asyncio.to_thread(get_today_stats, puuid)
-        total = stats["wins"] + stats["losses"]
+        # Use cached stats for faster response
+        total = cache.get("today_wins", 0) + cache.get("today_losses", 0)
         
         if total == 0:
             await ctx.send("📅 Today (24h): No ranked games observed since bot startup")
         else:
-            wr = int((stats["wins"] / total) * 100)
+            wins = cache.get("today_wins", 0)
+            losses = cache.get("today_losses", 0)
+            wr = int((wins / total) * 100) if total > 0 else 0
             
             # Create visual representation: 🟦 for wins, 🟥 for losses (newest -> oldest)
-            visual_games = ["🟦" if game == "W" else "🟥" for game in stats.get("games", [])]
+            visual_games = ["🟦" if game == "W" else "🟥" for game in cache.get("games", [])]
             visual_str = "".join(visual_games)
 
-            await ctx.send(f"📅 Today (24h): {stats['wins']}W/{stats['losses']}L Winrate {wr}% {visual_str}")
+            await ctx.send(f"📅 Today (24h): {wins}W/{losses}L Winrate {wr}% {visual_str}")
 
     @commands.command(aliases=["victorias", "w"])
     async def wins(self, ctx):
@@ -2418,22 +2375,35 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
             await ctx.send("❌ Cannot calculate - PUUID not available")
             return
         
-        # Recalculate streak from API
+        # Recalculate streak from API to ensure accuracy
         streak_data = await asyncio.to_thread(calculate_streak_from_api, puuid)
-        cache["win_streak"] = streak_data["win_streak"]
-        cache["lose_streak"] = streak_data["lose_streak"]
+        ws = streak_data.get("win_streak", 0)
+        ls = streak_data.get("lose_streak", 0)
         
-        # Update max win streak
-        if cache["win_streak"] > cache["max_win_streak"]:
-            cache["max_win_streak"] = cache["win_streak"]
-            save_persistent_stats()
+        # Update cache with fresh data
+        cache["win_streak"] = ws
+        cache["lose_streak"] = ls
+        if ws > cache.get("max_win_streak", 0):
+            cache["max_win_streak"] = ws
+        if ls > cache.get("max_lose_streak", 0):
+            cache["max_lose_streak"] = ls
+        save_persistent_stats()
         
-        if cache["win_streak"] > 0:
-            await ctx.send(f"🔥 {cache['win_streak']} win streak! (Max: {cache['max_win_streak']})")
-        elif cache["lose_streak"] > 0:
-            await ctx.send(f"💀 {cache['lose_streak']} lose streak! (Max: {cache['max_lose_streak']})")
+        # Respond with streak message from streak_messages.json (instant response)
+        if ws > 0:
+            msg = get_streak_message(STREAK_MESSAGES.get("win_streak", {}), ws)
+            if msg:
+                await ctx.send(msg)
+            else:
+                await ctx.send(f"🔥 {ws} win streak! (Max: {cache.get('max_win_streak', 0)})")
+        elif ls > 0:
+            msg = get_streak_message(STREAK_MESSAGES.get("lose_streak", {}), ls)
+            if msg:
+                await ctx.send(msg)
+            else:
+                await ctx.send(f"💀 {ls} lose streak! (Max: {cache.get('max_lose_streak', 0)})")
         else:
-            await ctx.send("No active streak")
+            await ctx.send("✅ No active streak! You're building a new one 💪")
 
     @commands.command(aliases=["history", "games"])
     async def historial(self, ctx):
@@ -2529,7 +2499,7 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
             # Save to persistent stats
             save_persistent_stats()
             
-            await ctx.send(f"✅ Win streak set to {new_streak}")
+            await ctx.send(f"✅ Streak re-set to {new_streak}")
             
         except Exception as e:
             await ctx.send(f"❌ Error setting streak: {str(e)}")
