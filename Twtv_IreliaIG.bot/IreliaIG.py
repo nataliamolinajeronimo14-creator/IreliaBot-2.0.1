@@ -2270,7 +2270,7 @@ class Bot(commands.Bot):
             wr = int((wins / total) * 100) if total > 0 else 0
             
             # Create visual representation: 🟦 for wins, 🟥 for losses (newest -> oldest)
-            visual_games = ["🟦" if game == "W" else "🟥" for game in cache.get("games", [])]
+            visual_games = ["💜" if game == "W" else "💩​" for game in cache.get("games", [])]
             visual_str = "".join(visual_games)
 
             await ctx.send(f"📅 Today (24h): {wins}W/{losses}L Winrate {wr}% {visual_str}")
