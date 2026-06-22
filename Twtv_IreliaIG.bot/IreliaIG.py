@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Load configuration
 config = configparser.ConfigParser()
-config_file = 'bot_config.ini'
-STREAK_MESSAGES_FILE = 'streak_messages.json'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+config_file = os.path.join(SCRIPT_DIR, 'bot_config.ini')
+STREAK_MESSAGES_FILE = os.path.join(SCRIPT_DIR, 'streak_messages.json')
 
 def load_streak_messages():
     """Load streak messages from JSON file. This is the SINGLE source of truth for streak messages."""
@@ -532,21 +533,42 @@ def guardar_datos(data):
 
 # ================== PERSISTENT STATS ================== #
 
-PERSISTENT_FILE = "bot_persistent_stats.json"
+PERSISTENT_FILE = os.path.join(SCRIPT_DIR, "bot_persistent_stats.json")
 
 def load_persistent_stats():
     """Load persistent stats from file"""
+    defaults = {
+        "win_streak": 0,
+        "lose_streak": 0,
+        "max_win_streak": 0,
+        "max_lose_streak": 0,
+        "last_game_id": None,
+        "last_game": None,
+        "final_message_sent_for": None,
+        "session_start": None
+    }
+
     if os.path.exists(PERSISTENT_FILE):
         try:
             with open(PERSISTENT_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Convert session_start back to timestamp if it's a string
-                if isinstance(data.get("session_start"), str):
+            if not isinstance(data, dict):
+                print(f"⚠️ Invalid persistent stats format in {PERSISTENT_FILE}")
+                return defaults
+
+            # Convert session_start back to timestamp if it's a string
+            if isinstance(data.get("session_start"), str):
+                try:
                     data["session_start"] = datetime.fromisoformat(data["session_start"]).timestamp()
-                return data
+                except Exception:
+                    data["session_start"] = None
+
+            for key, value in defaults.items():
+                data.setdefault(key, value)
+            return data
         except Exception as e:
             print(f"⚠️ Error loading persistent stats: {e}")
-    return {}
+    return defaults
 
 def save_persistent_stats():
     """Save current stats to file"""
