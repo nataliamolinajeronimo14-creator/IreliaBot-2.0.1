@@ -8,9 +8,9 @@
 - !rank - Show current League rank and LP
 - !irelia - Show Irelia-specific stats (winrate, KDA from recent games)
 - !last (!lastgame, !ult) - Show result of the last game played
-- !today (!sesion, !todaystats, !hoy) - Show session stats for the last 24 hours with visual game history
-- !wins (!victorias, !w) - Show today's ranked wins (last 24 hours)
-- !losses (!derrotas, !l) - Show today's ranked losses (last 24 hours)
+- !today (!sesion, !todaystats, !hoy, !shit, !wl, !caquitas) - Show today's ranked games since midnight with visual game history
+- !wins (!victorias, !w) - Show today's ranked wins (current day)
+- !losses (!derrotas, !l) - Show today's ranked losses (current day)
 - !kda (!kd, !stats) - Show average KDA from the last 15 ranked games
 - !winrate (!wr) - Show winrate percentage from the last 15 ranked games
 - !tilt (!tilted, !tilteado) - Check current lose streak

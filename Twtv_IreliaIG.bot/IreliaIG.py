@@ -591,14 +591,16 @@ def save_persistent_stats():
         print(f"⚠️ Error saving persistent stats: {e}")
 
 def calculate_stats_from_match_cache(puuid, hours=24):
-    """Use the local match cache to calculate wins/losses for the past N hours."""
+    """Use the local match cache to calculate wins/losses for the current Europe/Madrid day."""
     try:
         cache_data = load_match_cache(puuid)
         if not cache_data or not cache_data.get("matches"):
             return None
 
-        now = datetime.now(pytz.timezone("UTC"))
-        cutoff_time = now - timedelta(hours=hours)
+        madrid = pytz.timezone("Europe/Madrid")
+        now_local = datetime.now(madrid)
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_time = today_start_local.astimezone(pytz.UTC)
 
         wins = 0
         losses = 0
@@ -628,7 +630,7 @@ def calculate_stats_from_match_cache(puuid, hours=24):
 
 
 def calculate_stats_for_today(puuid):
-    """Calculate ranked solo queue wins/losses for matches played during the last 24 hours.
+    """Calculate ranked solo queue wins/losses for matches played since midnight Europe/Madrid.
 
     This function uses Riot match history plus the local match cache for fallback.
     It counts ranked solo games only and ignores remakes and excluded matches.
@@ -646,7 +648,10 @@ def calculate_stats_for_today(puuid):
         if not matches:
             return {"wins": 0, "losses": 0, "games": []}
 
-        cutoff_time = datetime.now(pytz.UTC) - timedelta(hours=24)
+        madrid = pytz.timezone("Europe/Madrid")
+        now_local = datetime.now(madrid)
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_time = today_start_local.astimezone(pytz.UTC)
         wins = 0
         losses = 0
         games = []  # newest -> oldest
@@ -704,9 +709,8 @@ def calculate_stats_for_today(puuid):
 
 
 def get_today_stats(puuid):
-    """Return today's ranked stats based on local Europe/Madrid game history."""
+    """Return today's ranked stats based on the local Europe/Madrid day."""
     today = datetime.now(pytz.timezone("Europe/Madrid")).date()
-
     if cache.get("today_date") != str(today):
         cache["today_date"] = str(today)
         cache["today_wins"] = 0
@@ -714,20 +718,20 @@ def get_today_stats(puuid):
         cache["games"] = []
 
     api_stats = calculate_stats_for_today(puuid)
-    if api_stats is None:
-        return {
-            "wins": cache.get("today_wins", 0),
-            "losses": cache.get("today_losses", 0),
-            "games": cache.get("games", [])
-        }
+    if api_stats is not None:
+        cache["today_wins"] = api_stats["wins"]
+        cache["today_losses"] = api_stats["losses"]
+        cache["games"] = api_stats.get("games", [])
+        return api_stats
 
-    cache["today_wins"] = api_stats["wins"]
-    cache["today_losses"] = api_stats["losses"]
-    cache["games"] = api_stats.get("games", [])
+    fallback_stats = calculate_stats_from_match_cache(puuid)
+    if fallback_stats is not None:
+        return fallback_stats
+
     return {
-        "wins": api_stats["wins"],
-        "losses": api_stats["losses"],
-        "games": api_stats.get("games", [])
+        "wins": cache.get("today_wins", 0),
+        "losses": cache.get("today_losses", 0),
+        "games": cache.get("games", [])
     }
 
 
@@ -997,12 +1001,6 @@ async def update_match_stats_after_finish(bot, data, match_id, puuid):
 
     zona = pytz.timezone("Europe/Madrid")
     ahora = datetime.now(zona)
-    hoy = ahora.date()
-
-    if cache.get("today_date") != str(hoy):
-        cache["today_date"] = str(hoy)
-        cache["today_wins"] = 0
-        cache["today_losses"] = 0
 
     if cache.get("session_start") is None:
         cache["session_start"] = ahora.timestamp()
@@ -2274,7 +2272,7 @@ class Bot(commands.Bot):
         else:
             await ctx.send("No last game data available")
 
-    @commands.command(aliases=["todaystats", "hoy", "sesion"])
+    @commands.command(aliases=["todaystats", "hoy", "sesion", "wl", "caquitas", "shit"])
     async def today(self, ctx):
         if not can_use(ctx.author.name, "today"): return
         
@@ -2289,38 +2287,18 @@ class Bot(commands.Bot):
         total = wins + losses
         
         if total == 0:
-            await ctx.send("📅 Last 24h: No ranked games observed")
+            await ctx.send("📅 Today: No ranked games observed")
             return
         
         wr = int((wins / total) * 100) if total > 0 else 0
-        visual_games = ["🟦" if game == "W" else "🟥" for game in stats.get("games", ["🟥"])]
+        invoked = ctx.message.content.strip().split()[0].lstrip("!").lower()
+        if invoked in {"shit", "caquitas", "wl"}:
+            visual_games = ["💜" if game == "W" else "💩" for game in stats.get("games", [])]
+        else:
+            visual_games = ["🟦" if game == "W" else "🟥" for game in stats.get("games", [])]
         visual_str = "".join(visual_games)
 
-        await ctx.send(f"📅 Last 24h: {wins}W/{losses}L Winrate {wr}% {visual_str}")
-
-    @commands.command(aliases=["wl", "caquitaas", "td"])
-    async def today(self, ctx):
-        if not can_use(ctx.author.name, "today"): return
-        
-        puuid = PUUID or get_puuid()
-        if not puuid:
-            await ctx.send("❌ Cannot calculate - PUUID not available")
-            return
-        
-        stats = await asyncio.to_thread(get_today_stats, puuid)
-        wins = stats.get("wins", 0)
-        losses = stats.get("losses", 0)
-        total = wins + losses
-        
-        if total == 0:
-            await ctx.send("📅 Last 24h: No ranked games observed")
-            return
-        
-        wr = int((wins / total) * 100) if total > 0 else 0
-        visual_games = ["💜" if game == "W" else "💩" for game in stats.get("games", [])]
-        visual_str = "".join(visual_games)
-
-        await ctx.send(f"📅 Last 24h: {wins}W/{losses}L Winrate {wr}% {visual_str}")
+        await ctx.send(f"📅 Today: {wins}W/{losses}L Winrate {wr}% {visual_str}")
         
     @commands.command(aliases=["recalctoday", "fixsession"])
     async def recalc(self, ctx):
@@ -2382,8 +2360,8 @@ class Bot(commands.Bot):
 !health - Check bot health and status (owner only and mods)
 !irelia - Show Irelia stats
 !last (aliases: !lastgame, !ult) - Show last game result
-!today (aliases: !sesion, !todaystats, !hoy) - Show session stats (24h) with visual history
-!wins (aliases: !victorias, !w) - Show today's ranked wins (24h)
+!today (aliases: !sesion, !todaystats, !hoy, !shit, !wl, !caquitas) - Show today's ranked games since midnight with visual history
+!wins (aliases: !victorias, !w) - Show today's ranked wins (current day)
 !losses (aliases: !derrotas, !l) - Show today's ranked losses (24h)
 !manualwin <match_id> - Manually add a missed ranked solo win (owner/mods)
 !manualloss <match_id> - Manually add a missed ranked solo loss (owner/mods)
@@ -2646,7 +2624,7 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
         cutoff_24h = datetime.now(pytz.UTC) - timedelta(hours=24)
         is_recent = creation_utc >= cutoff_24h
 
-        if is_recent and cache.get("today_date") == str(datetime.now(pytz.timezone("Europe/Madrid")).date()):
+        if is_recent:
             if is_new_match:
                 cache["today_wins"] = cache.get("today_wins", 0) + 1
                 cache["session_wins"] = cache.get("session_wins", 0) + 1
@@ -2737,7 +2715,7 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
         cutoff_24h = datetime.now(pytz.UTC) - timedelta(hours=24)
         is_recent = creation_utc >= cutoff_24h
 
-        if is_recent and cache.get("today_date") == str(datetime.now(pytz.timezone("Europe/Madrid")).date()):
+        if is_recent:
             if is_new_match:
                 cache["today_losses"] = cache.get("today_losses", 0) + 1
                 cache["session_losses"] = cache.get("session_losses", 0) + 1
