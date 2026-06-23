@@ -34,7 +34,10 @@
 
 # STATS MANAGMENT:
 - !clearlose - Remove the most recent loss from today's stats (useful for remakes or false losses)
+- !manualwin <match_id> - Manually add a missed ranked solo win from Riot match history
+- !manualloss <match_id> - Manually add a missed ranked solo loss from Riot match history
 - !setstreak <number>` - Manually set the current win streak (e.g., !setstreak 5)
+- !recalc (aliases: !recalctoday, !fixsession) - Refresh match cache and recalculate last 24h ranked stats
 
 ·Owner Commands (Bot Owner Only)
  These commands are restricted to the bot owner.
