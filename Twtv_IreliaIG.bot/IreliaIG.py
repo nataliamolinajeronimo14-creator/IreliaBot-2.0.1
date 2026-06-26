@@ -368,6 +368,46 @@ def format_rank(ranked_data):
 
     return "Unranked"
 
+def parse_solo_lp(ranked_entries):
+    """Return current Solo Queue LP from ranked entries."""
+    if not ranked_entries or not isinstance(ranked_entries, list):
+        return None
+    solo = next((q for q in ranked_entries if q.get("queueType") == "RANKED_SOLO_5x5"), None)
+    if solo is None:
+        return None
+    lp = solo.get("leaguePoints")
+    if isinstance(lp, int):
+        return lp
+    try:
+        return int(lp)
+    except Exception:
+        return None
+
+
+def update_session_lp(current_lp):
+    """Track current session LP gain over a 24h session."""
+    if current_lp is None:
+        return None
+
+    now = time.time()
+    session_start = cache.get("session_start")
+    if session_start is None or (now - session_start >= 86400):
+        cache["session_start"] = now
+        cache["session_lp_start"] = current_lp
+        cache["session_lp_last"] = current_lp
+        cache["session_lp_gain"] = 0
+        cache["session_lp_last_update"] = now
+        return 0
+
+    if cache.get("session_lp_start") is None:
+        cache["session_lp_start"] = current_lp
+
+    cache["session_lp_last"] = current_lp
+    cache["session_lp_gain"] = current_lp - cache["session_lp_start"]
+    cache["session_lp_last_update"] = now
+    return cache["session_lp_gain"]
+
+
 def format_detailed_game_stats(player_data, match_data, game_type):
     """Format detailed game statistics like LouisGameDev's bot"""
     try:
@@ -1008,6 +1048,10 @@ async def update_match_stats_after_finish(bot, data, match_id, puuid):
         cache["session_start"] = ahora.timestamp()
         cache["session_wins"] = 0
         cache["session_losses"] = 0
+        cache["session_lp_start"] = None
+        cache["session_lp_last"] = None
+        cache["session_lp_gain"] = 0
+        cache["session_lp_last_update"] = None
 
     cache["kda"] = round((player.get("kills", 0) + player.get("assists", 0)) / max(1, player.get("deaths", 0)), 2)
     total_session = cache.get("session_wins", 0) + cache.get("session_losses", 0)
@@ -1326,6 +1370,10 @@ cache = {
     "session_start": None,  # When current session started (24h window)
     "session_wins": 0,     # Wins in current session
     "session_losses": 0,   # Losses in current session
+    "session_lp_start": None,  # LP at start of current session
+    "session_lp_last": None,   # Latest LP reading during session
+    "session_lp_gain": 0,      # Net LP gain since session start
+    "session_lp_last_update": None,
     "ranked_wins": 0,      # Total ranked wins (persistent)
     "ranked_losses": 0,    # Total ranked losses (persistent)
     "win_streak": 0,       # Current win streak (persistent)
@@ -1807,6 +1855,9 @@ async def actualizar_datos(bot):
             ranked = get_rank(puuid) or []
             r = next((q for q in ranked if q["queueType"] == "RANKED_SOLO_5x5"), None)
             cache["rank"] = f"{r['tier']} {r['rank']} ({r['wins']}W/{r['losses']}L)" if r else "Sin rango"
+            current_lp = parse_solo_lp(ranked)
+            if current_lp is not None:
+                update_session_lp(current_lp)
 
             matches = get_matches(puuid, 1) or []
             if not matches or not isinstance(matches, list):
@@ -1826,6 +1877,9 @@ async def actualizar_datos(bot):
                 if ranked:
                     old_rank = cache["rank"]
                     cache["rank"] = format_rank(ranked)
+                    current_lp = parse_solo_lp(ranked)
+                    if current_lp is not None:
+                        update_session_lp(current_lp)
                     cache["rank_last_update"] = datetime.now()
                     cache["api_status"] = "working"
                     cache["last_rank_check"] = now
@@ -2345,6 +2399,39 @@ class Bot(commands.Bot):
         stats = await asyncio.to_thread(get_today_stats, puuid)
         await ctx.send(f"💀 Today's Ranked Losses: {stats['losses']}")
 
+    @commands.command(aliases=["lps"])
+    async def gains(self, ctx):
+        if not can_use(ctx.author.name, "gains"): return
+        
+        puuid = PUUID or get_puuid()
+        if not puuid:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+
+        ranked = await asyncio.to_thread(get_rank, puuid) or []
+        current_lp = parse_solo_lp(ranked)
+        if current_lp is None:
+            await ctx.send("❌ Could not determine current Solo Queue LP")
+            return
+
+        if cache.get("session_lp_start") is None:
+            update_session_lp(current_lp)
+
+        session_lp_start = cache.get("session_lp_start")
+        session_lp_gain = cache.get("session_lp_gain", 0)
+        session_wins = cache.get("session_wins", 0)
+        session_losses = cache.get("session_losses", 0)
+        total_session_games = session_wins + session_losses
+
+        if total_session_games == 0 or session_lp_gain == 0:
+            await ctx.send("Todavía no hay partidas jugadas bro :/")
+            return
+
+        sign = "+" if session_lp_gain >= 0 else ""
+        await ctx.send(
+            f"📈 Session LP: {sign}{session_lp_gain} LP | Start: {session_lp_start} LP | Current: {current_lp} LP | W/L: {session_wins}/{session_losses}"
+        )
+
     @commands.command(aliases=["help"])
     async def cmd(self, ctx):
         if not can_use(ctx.author.name, "cmd"): return
@@ -2363,6 +2450,7 @@ class Bot(commands.Bot):
 !today (aliases: !sesion, !todaystats, !hoy, !shit, !wl, !caquitas) - Show today's ranked games since midnight with visual history
 !wins (aliases: !victorias, !w) - Show today's ranked wins (current day)
 !losses (aliases: !derrotas, !l) - Show today's ranked losses (24h)
+!gains (aliases: !lps) - Show LP gains/losses for the current 24h session
 !manualwin <match_id> - Manually add a missed ranked solo win (owner/mods)
 !manualloss <match_id> - Manually add a missed ranked solo loss (owner/mods)
 !recalc (aliases: !recalctoday, !fixsession) - Refresh cache and recalculate last 24h stats
