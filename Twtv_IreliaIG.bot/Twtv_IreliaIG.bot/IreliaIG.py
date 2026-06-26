@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Load configuration
 config = configparser.ConfigParser()
-config_file = 'bot_config.ini'
-STREAK_MESSAGES_FILE = 'streak_messages.json'
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+config_file = os.path.join(SCRIPT_DIR, 'bot_config.ini')
+STREAK_MESSAGES_FILE = os.path.join(SCRIPT_DIR, 'streak_messages.json')
 
 def load_streak_messages():
     """Load streak messages from JSON file. This is the SINGLE source of truth for streak messages."""
@@ -367,6 +368,46 @@ def format_rank(ranked_data):
 
     return "Unranked"
 
+def parse_solo_lp(ranked_entries):
+    """Return current Solo Queue LP from ranked entries."""
+    if not ranked_entries or not isinstance(ranked_entries, list):
+        return None
+    solo = next((q for q in ranked_entries if q.get("queueType") == "RANKED_SOLO_5x5"), None)
+    if solo is None:
+        return None
+    lp = solo.get("leaguePoints")
+    if isinstance(lp, int):
+        return lp
+    try:
+        return int(lp)
+    except Exception:
+        return None
+
+
+def update_session_lp(current_lp):
+    """Track current session LP gain over a 24h session."""
+    if current_lp is None:
+        return None
+
+    now = time.time()
+    session_start = cache.get("session_start")
+    if session_start is None or (now - session_start >= 86400):
+        cache["session_start"] = now
+        cache["session_lp_start"] = current_lp
+        cache["session_lp_last"] = current_lp
+        cache["session_lp_gain"] = 0
+        cache["session_lp_last_update"] = now
+        return 0
+
+    if cache.get("session_lp_start") is None:
+        cache["session_lp_start"] = current_lp
+
+    cache["session_lp_last"] = current_lp
+    cache["session_lp_gain"] = current_lp - cache["session_lp_start"]
+    cache["session_lp_last_update"] = now
+    return cache["session_lp_gain"]
+
+
 def format_detailed_game_stats(player_data, match_data, game_type):
     """Format detailed game statistics like LouisGameDev's bot"""
     try:
@@ -532,21 +573,42 @@ def guardar_datos(data):
 
 # ================== PERSISTENT STATS ================== #
 
-PERSISTENT_FILE = "bot_persistent_stats.json"
+PERSISTENT_FILE = os.path.join(SCRIPT_DIR, "bot_persistent_stats.json")
 
 def load_persistent_stats():
     """Load persistent stats from file"""
+    defaults = {
+        "win_streak": 0,
+        "lose_streak": 0,
+        "max_win_streak": 0,
+        "max_lose_streak": 0,
+        "last_game_id": None,
+        "last_game": None,
+        "final_message_sent_for": None,
+        "session_start": None
+    }
+
     if os.path.exists(PERSISTENT_FILE):
         try:
             with open(PERSISTENT_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Convert session_start back to timestamp if it's a string
-                if isinstance(data.get("session_start"), str):
+            if not isinstance(data, dict):
+                print(f"⚠️ Invalid persistent stats format in {PERSISTENT_FILE}")
+                return defaults
+
+            # Convert session_start back to timestamp if it's a string
+            if isinstance(data.get("session_start"), str):
+                try:
                     data["session_start"] = datetime.fromisoformat(data["session_start"]).timestamp()
-                return data
+                except Exception:
+                    data["session_start"] = None
+
+            for key, value in defaults.items():
+                data.setdefault(key, value)
+            return data
         except Exception as e:
             print(f"⚠️ Error loading persistent stats: {e}")
-    return {}
+    return defaults
 
 def save_persistent_stats():
     """Save current stats to file"""
@@ -569,14 +631,16 @@ def save_persistent_stats():
         print(f"⚠️ Error saving persistent stats: {e}")
 
 def calculate_stats_from_match_cache(puuid, hours=24):
-    """Use the local match cache to calculate wins/losses for the past N hours."""
+    """Use the local match cache to calculate wins/losses for the current Europe/Madrid day."""
     try:
         cache_data = load_match_cache(puuid)
         if not cache_data or not cache_data.get("matches"):
             return None
 
-        now = datetime.now(pytz.timezone("UTC"))
-        cutoff_time = now - timedelta(hours=hours)
+        madrid = pytz.timezone("Europe/Madrid")
+        now_local = datetime.now(madrid)
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_time = today_start_local.astimezone(pytz.UTC)
 
         wins = 0
         losses = 0
@@ -606,55 +670,77 @@ def calculate_stats_from_match_cache(puuid, hours=24):
 
 
 def calculate_stats_for_today(puuid):
-    """Calculate ranked solo queue wins/losses for matches played since local midnight.
+    """Calculate ranked solo queue wins/losses for matches played since midnight Europe/Madrid.
 
-    This function uses timezone-aware datetimes to compare Riot's gameCreation (UTC ms)
-    against the local Europe/Madrid date. It returns games in newest->oldest order.
+    This function uses Riot match history plus the local match cache for fallback.
+    It counts ranked solo games only and ignores remakes and excluded matches.
     """
     try:
+        cache_data = load_match_cache(puuid)
+        excluded_matches = set(cache_data.get("excluded_matches", []))
+        cached_matches = {
+            item.get("match_id"): item
+            for item in cache_data.get("matches", [])
+            if item.get("match_id")
+        }
+
         matches = get_matches(puuid, count=200)
         if not matches:
             return {"wins": 0, "losses": 0, "games": []}
 
-        tz = pytz.timezone("Europe/Madrid")
-        today = datetime.now(tz).date()
-
+        madrid = pytz.timezone("Europe/Madrid")
+        now_local = datetime.now(madrid)
+        today_start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        cutoff_time = today_start_local.astimezone(pytz.UTC)
         wins = 0
         losses = 0
         games = []  # newest -> oldest
 
         for match_id in matches:
-            match_data = get_match_data(match_id)
-            if not match_data or "info" not in match_data:
+            if not match_id or match_id in excluded_matches:
                 continue
 
-            # Riot's gameCreation is milliseconds since epoch (UTC)
-            creation_ms = match_data["info"].get("gameCreation", 0)
-            creation_dt = datetime.fromtimestamp(creation_ms / 1000, tz=pytz.UTC).astimezone(tz)
+            match_data = get_match_data(match_id)
+            cached_match = cached_matches.get(match_id)
 
-            # If this match is older than today and matches are sorted newest->oldest, we can stop
-            if creation_dt.date() < today:
+            match_time = None
+            if match_data and "info" in match_data:
+                creation_ms = match_data["info"].get("gameCreation", 0)
+                match_time = datetime.fromtimestamp(creation_ms / 1000, tz=pytz.UTC)
+            elif cached_match and cached_match.get("timestamp") is not None:
+                match_time = datetime.fromtimestamp(cached_match["timestamp"] / 1000, tz=pytz.UTC)
+
+            if match_time is None:
+                continue
+
+            if match_time < cutoff_time:
+                # Since Riot returns newest->oldest, we can stop once we're beyond 24 hours
                 break
 
-            # Only consider matches from today
-            if creation_dt.date() != today:
-                continue
+            if match_data and "info" in match_data:
+                if match_data["info"].get("queueId") != 420:
+                    continue
+                if match_data["info"].get("gameDuration", 0) < 300:
+                    continue
 
-            if match_data["info"].get("queueId") != 420:
-                continue
-            if match_data["info"].get("gameDuration", 0) < 300:
-                continue
+                player = next((p for p in match_data["info"]["participants"] if p.get("puuid") == puuid), None)
+                if not player:
+                    continue
 
-            player = next((p for p in match_data["info"]["participants"] if p.get("puuid") == puuid), None)
-            if not player:
-                continue
-
-            if player.get("win"):
-                wins += 1
-                games.append("W")
+                if player.get("win"):
+                    wins += 1
+                    games.append("W")
+                else:
+                    losses += 1
+                    games.append("L")
             else:
-                losses += 1
-                games.append("L")
+                # Fallback to cached match result when API data is unavailable
+                if cached_match and cached_match.get("result") in ("W", "L"):
+                    if cached_match["result"] == "W":
+                        wins += 1
+                    else:
+                        losses += 1
+                    games.append(cached_match["result"])
 
         return {"wins": wins, "losses": losses, "games": games}
     except Exception as e:
@@ -663,9 +749,8 @@ def calculate_stats_for_today(puuid):
 
 
 def get_today_stats(puuid):
-    """Return today's ranked stats based on local Europe/Madrid game history."""
+    """Return today's ranked stats based on the local Europe/Madrid day."""
     today = datetime.now(pytz.timezone("Europe/Madrid")).date()
-
     if cache.get("today_date") != str(today):
         cache["today_date"] = str(today)
         cache["today_wins"] = 0
@@ -673,20 +758,20 @@ def get_today_stats(puuid):
         cache["games"] = []
 
     api_stats = calculate_stats_for_today(puuid)
-    if api_stats is None:
-        return {
-            "wins": cache.get("today_wins", 0),
-            "losses": cache.get("today_losses", 0),
-            "games": cache.get("games", [])
-        }
+    if api_stats is not None:
+        cache["today_wins"] = api_stats["wins"]
+        cache["today_losses"] = api_stats["losses"]
+        cache["games"] = api_stats.get("games", [])
+        return api_stats
 
-    cache["today_wins"] = api_stats["wins"]
-    cache["today_losses"] = api_stats["losses"]
-    cache["games"] = api_stats.get("games", [])
+    fallback_stats = calculate_stats_from_match_cache(puuid)
+    if fallback_stats is not None:
+        return fallback_stats
+
     return {
-        "wins": api_stats["wins"],
-        "losses": api_stats["losses"],
-        "games": api_stats.get("games", [])
+        "wins": cache.get("today_wins", 0),
+        "losses": cache.get("today_losses", 0),
+        "games": cache.get("games", [])
     }
 
 
@@ -956,12 +1041,6 @@ async def update_match_stats_after_finish(bot, data, match_id, puuid):
 
     zona = pytz.timezone("Europe/Madrid")
     ahora = datetime.now(zona)
-    hoy = ahora.date()
-
-    if cache.get("today_date") != str(hoy):
-        cache["today_date"] = str(hoy)
-        cache["today_wins"] = 0
-        cache["today_losses"] = 0
 
     if cache.get("session_start") is None:
         cache["session_start"] = ahora.timestamp()
@@ -969,6 +1048,10 @@ async def update_match_stats_after_finish(bot, data, match_id, puuid):
         cache["session_start"] = ahora.timestamp()
         cache["session_wins"] = 0
         cache["session_losses"] = 0
+        cache["session_lp_start"] = None
+        cache["session_lp_last"] = None
+        cache["session_lp_gain"] = 0
+        cache["session_lp_last_update"] = None
 
     cache["kda"] = round((player.get("kills", 0) + player.get("assists", 0)) / max(1, player.get("deaths", 0)), 2)
     total_session = cache.get("session_wins", 0) + cache.get("session_losses", 0)
@@ -1287,6 +1370,10 @@ cache = {
     "session_start": None,  # When current session started (24h window)
     "session_wins": 0,     # Wins in current session
     "session_losses": 0,   # Losses in current session
+    "session_lp_start": None,  # LP at start of current session
+    "session_lp_last": None,   # Latest LP reading during session
+    "session_lp_gain": 0,      # Net LP gain since session start
+    "session_lp_last_update": None,
     "ranked_wins": 0,      # Total ranked wins (persistent)
     "ranked_losses": 0,    # Total ranked losses (persistent)
     "win_streak": 0,       # Current win streak (persistent)
@@ -1768,6 +1855,9 @@ async def actualizar_datos(bot):
             ranked = get_rank(puuid) or []
             r = next((q for q in ranked if q["queueType"] == "RANKED_SOLO_5x5"), None)
             cache["rank"] = f"{r['tier']} {r['rank']} ({r['wins']}W/{r['losses']}L)" if r else "Sin rango"
+            current_lp = parse_solo_lp(ranked)
+            if current_lp is not None:
+                update_session_lp(current_lp)
 
             matches = get_matches(puuid, 1) or []
             if not matches or not isinstance(matches, list):
@@ -1787,6 +1877,9 @@ async def actualizar_datos(bot):
                 if ranked:
                     old_rank = cache["rank"]
                     cache["rank"] = format_rank(ranked)
+                    current_lp = parse_solo_lp(ranked)
+                    if current_lp is not None:
+                        update_session_lp(current_lp)
                     cache["rank_last_update"] = datetime.now()
                     cache["api_status"] = "working"
                     cache["last_rank_check"] = now
@@ -2233,25 +2326,54 @@ class Bot(commands.Bot):
         else:
             await ctx.send("No last game data available")
 
-    @commands.command(aliases=["todaystats", "hoy", "sesion"])
+    @commands.command(aliases=["todaystats", "hoy", "sesion", "wl", "caquitas", "shit"])
     async def today(self, ctx):
         if not can_use(ctx.author.name, "today"): return
         
-        # Use cached stats for faster response
-        total = cache.get("today_wins", 0) + cache.get("today_losses", 0)
+        puuid = PUUID or get_puuid()
+        if not puuid:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+        
+        stats = await asyncio.to_thread(get_today_stats, puuid)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        total = wins + losses
         
         if total == 0:
-            await ctx.send("📅 Today (24h): No ranked games observed since bot startup")
+            await ctx.send("📅 Today: No ranked games observed")
+            return
+        
+        wr = int((wins / total) * 100) if total > 0 else 0
+        invoked = ctx.message.content.strip().split()[0].lstrip("!").lower()
+        if invoked in {"shit", "caquitas", "wl"}:
+            visual_games = ["💜" if game == "W" else "💩" for game in stats.get("games", [])]
         else:
-            wins = cache.get("today_wins", 0)
-            losses = cache.get("today_losses", 0)
-            wr = int((wins / total) * 100) if total > 0 else 0
-            
-            # Create visual representation: 🟦 for wins, 🟥 for losses (newest -> oldest)
-            visual_games = ["🟦" if game == "W" else "🟥" for game in cache.get("games", [])]
-            visual_str = "".join(visual_games)
+            visual_games = ["🟦" if game == "W" else "🟥" for game in stats.get("games", [])]
+        visual_str = "".join(visual_games)
 
-            await ctx.send(f"📅 Today (24h): {wins}W/{losses}L Winrate {wr}% {visual_str}")
+        await ctx.send(f"📅 Today: {wins}W/{losses}L Winrate {wr}% {visual_str}")
+        
+    @commands.command(aliases=["recalctoday", "fixsession"])
+    async def recalc(self, ctx):
+        if not can_use(ctx.author.name, "recalc"): return
+        if not has_permission(ctx, owner_only=False): await ctx.send("❌ Permission denied"); return
+
+        puuid = PUUID or get_puuid()
+        if not puuid:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+
+        await ctx.send("🔄 Refreshing match cache and recalculating last 24h stats...")
+        await asyncio.to_thread(update_match_cache, puuid, 100)
+        stats = await asyncio.to_thread(get_today_stats, puuid)
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        total = wins + losses
+        wr = int((wins / total) * 100) if total > 0 else 0
+        visual_games = ["💜" if game == "W" else "💩" for game in stats.get("games", [])]
+        visual_str = "".join(visual_games)
+        await ctx.send(f"✅ Recalculated: {wins}W/{losses}L Winrate {wr}% {visual_str}")
 
     @commands.command(aliases=["victorias", "w"])
     async def wins(self, ctx):
@@ -2277,6 +2399,33 @@ class Bot(commands.Bot):
         stats = await asyncio.to_thread(get_today_stats, puuid)
         await ctx.send(f"💀 Today's Ranked Losses: {stats['losses']}")
 
+    @commands.command(aliases=["lps"])
+    async def gains(self, ctx):
+        if not can_use(ctx.author.name, "gains"): return
+        
+        puuid = PUUID or get_puuid()
+        if not puuid:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+
+        ranked = await asyncio.to_thread(get_rank, puuid) or []
+        current_lp = parse_solo_lp(ranked)
+        if current_lp is None:
+            await ctx.send("❌ Could not determine current Solo Queue LP")
+            return
+
+        if cache.get("session_lp_start") is None:
+            update_session_lp(current_lp)
+
+        session_lp_start = cache.get("session_lp_start")
+        session_lp_gain = cache.get("session_lp_gain", 0)
+        session_wins = cache.get("session_wins", 0)
+        session_losses = cache.get("session_losses", 0)
+        sign = "+" if session_lp_gain >= 0 else ""
+        await ctx.send(
+            f"📈 Session LP: {sign}{session_lp_gain} LP | Start: {session_lp_start} LP | Current: {current_lp} LP | W/L: {session_wins}/{session_losses}"
+        )
+
     @commands.command(aliases=["help"])
     async def cmd(self, ctx):
         if not can_use(ctx.author.name, "cmd"): return
@@ -2292,9 +2441,13 @@ class Bot(commands.Bot):
 !health - Check bot health and status (owner only and mods)
 !irelia - Show Irelia stats
 !last (aliases: !lastgame, !ult) - Show last game result
-!today (aliases: !sesion, !todaystats, !hoy) - Show session stats (24h) with visual history
-!wins (aliases: !victorias, !w) - Show today's ranked wins (24h)
+!today (aliases: !sesion, !todaystats, !hoy, !shit, !wl, !caquitas) - Show today's ranked games since midnight with visual history
+!wins (aliases: !victorias, !w) - Show today's ranked wins (current day)
 !losses (aliases: !derrotas, !l) - Show today's ranked losses (24h)
+!gains (aliases: !lps) - Show LP gains/losses for the current 24h session
+!manualwin <match_id> - Manually add a missed ranked solo win (owner/mods)
+!manualloss <match_id> - Manually add a missed ranked solo loss (owner/mods)
+!recalc (aliases: !recalctoday, !fixsession) - Refresh cache and recalculate last 24h stats
 !cmd (!help) - List all commands (help)
 !kda (aliases: !kd, !stats) - Show average KDA from last 15 ranked games
 !winrate (aliases: !wr) - Show winrate from last 15 ranked games
@@ -2370,24 +2523,40 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
     async def winstreak(self, ctx):
         if not can_use(ctx.author.name, "winstreak"): return
         
-        ws = cache.get("win_streak", 0)
-        ls = cache.get("lose_streak", 0)
+        puuid = PUUID or get_puuid()
+        if not puuid:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
         
-        # Use same message format as when game ends
-        if ws >= 3:
+        # Recalculate streak from API to ensure accuracy
+        streak_data = await asyncio.to_thread(calculate_streak_from_api, puuid)
+        ws = streak_data.get("win_streak", 0)
+        ls = streak_data.get("lose_streak", 0)
+        
+        # Update cache with fresh data
+        cache["win_streak"] = ws
+        cache["lose_streak"] = ls
+        if ws > cache.get("max_win_streak", 0):
+            cache["max_win_streak"] = ws
+        if ls > cache.get("max_lose_streak", 0):
+            cache["max_lose_streak"] = ls
+        save_persistent_stats()
+        
+        # Respond with streak message from streak_messages.json (instant response)
+        if ws > 0:
             msg = get_streak_message(STREAK_MESSAGES.get("win_streak", {}), ws)
             if msg:
                 await ctx.send(msg)
             else:
                 await ctx.send(f"🔥 {ws} win streak! (Max: {cache.get('max_win_streak', 0)})")
-        elif ls >= 2:
+        elif ls > 0:
             msg = get_streak_message(STREAK_MESSAGES.get("lose_streak", {}), ls)
             if msg:
                 await ctx.send(msg)
             else:
                 await ctx.send(f"💀 {ls} lose streak! (Max: {cache.get('max_lose_streak', 0)})")
         else:
-            await ctx.send("No active streak (< 3 wins or < 2 losses)")
+            await ctx.send("✅ No active streak! You're building a new one 💪")
 
     @commands.command(aliases=["history", "games"])
     async def historial(self, ctx):
@@ -2463,6 +2632,189 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
             await ctx.send(f"❌ Error clearing loss: {str(e)}")
 
     @commands.command()
+    async def manualwin(self, ctx, match_id: str = None):
+        if not can_use(ctx.author.name, "manualwin"): return
+        if not has_permission(ctx, owner_only=False): await ctx.send("❌ Permission denied"); return
+
+        if not match_id:
+            await ctx.send("❌ Usage: !manualwin <match_id>")
+            return
+
+        if not PUUID:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+
+        await ctx.send("🔎 Verifying manual match...")
+        match_data = await asyncio.to_thread(get_match_data, match_id)
+        if not match_data or "info" not in match_data:
+            await ctx.send("❌ Could not load match data. Check the match ID and try again.")
+            return
+
+        if match_data["info"].get("queueId") != 420:
+            await ctx.send("❌ Only ranked solo games can be added manually.")
+            return
+
+        if match_data["info"].get("gameDuration", 0) < 300:
+            await ctx.send("❌ Cannot manually add remakes or very short games.")
+            return
+
+        player = next((p for p in match_data["info"]["participants"] if p.get("puuid") == PUUID), None)
+        if not player:
+            await ctx.send("❌ This match does not contain the tracked summoner.")
+            return
+
+        if not player.get("win"):
+            await ctx.send("❌ Manual add only supports won ranked games.")
+            return
+
+        cache_data = load_match_cache(PUUID)
+        matches_list = cache_data.get("matches", [])
+        existing = next((item for item in matches_list if item.get("match_id") == match_id), None)
+        is_new_match = existing is None
+        changed_result = False
+
+        if existing:
+            if existing.get("result") == "W":
+                await ctx.send("✅ This win is already registered in the match cache.")
+                return
+            existing["result"] = "W"
+            existing["timestamp"] = match_data["info"].get("gameCreation", existing.get("timestamp"))
+            changed_result = True
+        else:
+            matches_list.insert(0, {
+                "match_id": match_id,
+                "result": "W",
+                "timestamp": match_data["info"].get("gameCreation", 0)
+            })
+
+        if match_id in cache_data.get("excluded_matches", []):
+            cache_data["excluded_matches"] = [m for m in cache_data.get("excluded_matches", []) if m != match_id]
+
+        # Recalculate cached ranked stats
+        wins = sum(1 for item in matches_list if item.get("result") == "W")
+        losses = sum(1 for item in matches_list if item.get("result") == "L")
+        cache_data["matches"] = matches_list
+        cache_data["ranked_stats"] = {"wins": wins, "losses": losses}
+        cache_data["last_updated"] = time.time()
+        save_match_cache(cache_data, PUUID)
+
+        cache["ranked_wins"] = wins
+        cache["ranked_losses"] = losses
+
+        creation_ms = match_data["info"].get("gameCreation", 0)
+        creation_utc = datetime.fromtimestamp(creation_ms / 1000, tz=pytz.UTC)
+        cutoff_24h = datetime.now(pytz.UTC) - timedelta(hours=24)
+        is_recent = creation_utc >= cutoff_24h
+
+        if is_recent:
+            if is_new_match:
+                cache["today_wins"] = cache.get("today_wins", 0) + 1
+                cache["session_wins"] = cache.get("session_wins", 0) + 1
+                cache["games"] = (["W"] + cache.get("games", []))[:5]
+            elif changed_result:
+                cache["today_wins"] = cache.get("today_wins", 0) + 1
+                cache["today_losses"] = max(0, cache.get("today_losses", 0) - 1)
+                cache["session_wins"] = cache.get("session_wins", 0) + 1
+                cache["session_losses"] = max(0, cache.get("session_losses", 0) - 1)
+
+        summary = _format_last_game_summary(match_data, PUUID)
+        if summary:
+            await ctx.send(f"✅ Manual win added: {summary}")
+        else:
+            await ctx.send(f"✅ Manual win added for match {match_id[:10]}...")
+
+    @commands.command()
+    async def manualloss(self, ctx, match_id: str = None):
+        if not can_use(ctx.author.name, "manualloss"): return
+        if not has_permission(ctx, owner_only=False): await ctx.send("❌ Permission denied"); return
+
+        if not match_id:
+            await ctx.send("❌ Usage: !manualloss <match_id>")
+            return
+
+        if not PUUID:
+            await ctx.send("❌ Cannot calculate - PUUID not available")
+            return
+
+        await ctx.send("🔎 Verifying manual match...")
+        match_data = await asyncio.to_thread(get_match_data, match_id)
+        if not match_data or "info" not in match_data:
+            await ctx.send("❌ Could not load match data. Check the match ID and try again.")
+            return
+
+        if match_data["info"].get("queueId") != 420:
+            await ctx.send("❌ Only ranked solo games can be added manually.")
+            return
+
+        if match_data["info"].get("gameDuration", 0) < 300:
+            await ctx.send("❌ Cannot manually add remakes or very short games.")
+            return
+
+        player = next((p for p in match_data["info"]["participants"] if p.get("puuid") == PUUID), None)
+        if not player:
+            await ctx.send("❌ This match does not contain the tracked summoner.")
+            return
+
+        if player.get("win"):
+            await ctx.send("❌ Manual add only supports lost ranked games.")
+            return
+
+        cache_data = load_match_cache(PUUID)
+        matches_list = cache_data.get("matches", [])
+        existing = next((item for item in matches_list if item.get("match_id") == match_id), None)
+        is_new_match = existing is None
+        changed_result = False
+
+        if existing:
+            if existing.get("result") == "L":
+                await ctx.send("✅ This loss is already registered in the match cache.")
+                return
+            existing["result"] = "L"
+            existing["timestamp"] = match_data["info"].get("gameCreation", existing.get("timestamp"))
+            changed_result = True
+        else:
+            matches_list.insert(0, {
+                "match_id": match_id,
+                "result": "L",
+                "timestamp": match_data["info"].get("gameCreation", 0)
+            })
+
+        if match_id in cache_data.get("excluded_matches", []):
+            cache_data["excluded_matches"] = [m for m in cache_data.get("excluded_matches", []) if m != match_id]
+
+        wins = sum(1 for item in matches_list if item.get("result") == "W")
+        losses = sum(1 for item in matches_list if item.get("result") == "L")
+        cache_data["matches"] = matches_list
+        cache_data["ranked_stats"] = {"wins": wins, "losses": losses}
+        cache_data["last_updated"] = time.time()
+        save_match_cache(cache_data, PUUID)
+
+        cache["ranked_wins"] = wins
+        cache["ranked_losses"] = losses
+
+        creation_ms = match_data["info"].get("gameCreation", 0)
+        creation_utc = datetime.fromtimestamp(creation_ms / 1000, tz=pytz.UTC)
+        cutoff_24h = datetime.now(pytz.UTC) - timedelta(hours=24)
+        is_recent = creation_utc >= cutoff_24h
+
+        if is_recent:
+            if is_new_match:
+                cache["today_losses"] = cache.get("today_losses", 0) + 1
+                cache["session_losses"] = cache.get("session_losses", 0) + 1
+                cache["games"] = (["L"] + cache.get("games", []))[:5]
+            elif changed_result:
+                cache["today_losses"] = cache.get("today_losses", 0) + 1
+                cache["today_wins"] = max(0, cache.get("today_wins", 0) - 1)
+                cache["session_losses"] = cache.get("session_losses", 0) + 1
+                cache["session_wins"] = max(0, cache.get("session_wins", 0) - 1)
+
+        summary = _format_last_game_summary(match_data, PUUID)
+        if summary:
+            await ctx.send(f"✅ Manual loss added: {summary}")
+        else:
+            await ctx.send(f"✅ Manual loss added for match {match_id[:10]}...")
+
+    @commands.command()
     async def setstreak(self, ctx, new_streak: int = None):
         if not can_use(ctx.author.name, "setstreak"): return
         if not has_permission(ctx, owner_only=False): await ctx.send("❌ Permission denied"); return
@@ -2479,7 +2831,9 @@ Bot automatically posts detailed game results with K/D/A, Kill Participation, da
             # Set the win streak
             cache["win_streak"] = new_streak
             cache["lose_streak"] = 0  # Reset lose streak when manually setting win streak
-            
+            if new_streak > cache.get("max_win_streak", 0):
+                cache["max_win_streak"] = new_streak
+
             # Save to persistent stats
             save_persistent_stats()
             
