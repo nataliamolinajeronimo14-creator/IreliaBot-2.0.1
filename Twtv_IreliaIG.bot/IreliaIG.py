@@ -368,43 +368,95 @@ def format_rank(ranked_data):
 
     return "Unranked"
 
-def parse_solo_lp(ranked_entries):
-    """Return current Solo Queue LP from ranked entries."""
-    if not ranked_entries or not isinstance(ranked_entries, list):
+RANK_TIER_BASE = {
+    "iron": 0,
+    "bronze": 400,
+    "silver": 800,
+    "gold": 1200,
+    "platinum": 1600,
+    "diamond": 2000,
+    "master": 2400,
+    "grandmaster": 2600,
+    "challenger": 2800,
+}
+
+DIVISION_OFFSET = {
+    "IV": 0,
+    "III": 100,
+    "II": 200,
+    "I": 300,
+}
+
+
+def rank_entry_to_absolute_lp(entry):
+    if not entry or not isinstance(entry, dict):
         return None
-    solo = next((q for q in ranked_entries if q.get("queueType") == "RANKED_SOLO_5x5"), None)
-    if solo is None:
+
+    tier = str(entry.get("tier", "")).lower()
+    rank = str(entry.get("rank", "")).upper()
+    lp = entry.get("leaguePoints", 0)
+
+    base = RANK_TIER_BASE.get(tier)
+    if base is None:
         return None
-    lp = solo.get("leaguePoints")
-    if isinstance(lp, int):
-        return lp
+
+    if tier in {"master", "grandmaster", "challenger"}:
+        try:
+            return base + int(lp)
+        except Exception:
+            return None
+
+    offset = DIVISION_OFFSET.get(rank)
+    if offset is None:
+        return None
+
     try:
-        return int(lp)
+        return base + offset + int(lp)
     except Exception:
         return None
 
 
-def update_session_lp(current_lp):
-    """Track current session LP gain over a 24h session."""
-    if current_lp is None:
+def parse_solo_lp(ranked_entries):
+    """Return current Solo Queue LP and absolute LP from ranked entries."""
+    if not ranked_entries or not isinstance(ranked_entries, list):
+        return None, None
+    solo = next((q for q in ranked_entries if q.get("queueType") == "RANKED_SOLO_5x5"), None)
+    if solo is None:
+        return None, None
+    lp = solo.get("leaguePoints")
+    try:
+        raw_lp = int(lp)
+    except Exception:
+        raw_lp = None
+    abs_lp = rank_entry_to_absolute_lp(solo)
+    return raw_lp, abs_lp
+
+
+def update_session_lp(current_abs_lp, current_lp=None):
+    """Track current session LP gain over a 24h session using absolute rank points."""
+    if current_abs_lp is None:
         return None
 
     now = time.time()
     session_start = cache.get("session_start")
     if session_start is None or (now - session_start >= 86400):
         cache["session_start"] = now
-        cache["session_lp_start"] = current_lp
-        cache["session_lp_last"] = current_lp
+        cache["session_lp_start"] = current_abs_lp
+        cache["session_lp_start_raw"] = current_lp
+        cache["session_lp_last"] = current_abs_lp
+        cache["session_lp_current_raw"] = current_lp
         cache["session_lp_gain"] = 0
         cache["session_lp_last_update"] = now
         return 0
 
     if cache.get("session_lp_start") is None:
-        cache["session_lp_start"] = current_lp
+        cache["session_lp_start"] = current_abs_lp
 
-    cache["session_lp_last"] = current_lp
-    cache["session_lp_gain"] = current_lp - cache["session_lp_start"]
+    cache["session_lp_last"] = current_abs_lp
+    cache["session_lp_gain"] = current_abs_lp - cache["session_lp_start"]
     cache["session_lp_last_update"] = now
+    if current_lp is not None:
+        cache["session_lp_current_raw"] = current_lp
     return cache["session_lp_gain"]
 
 
@@ -1049,7 +1101,9 @@ async def update_match_stats_after_finish(bot, data, match_id, puuid):
         cache["session_wins"] = 0
         cache["session_losses"] = 0
         cache["session_lp_start"] = None
+        cache["session_lp_start_raw"] = None
         cache["session_lp_last"] = None
+        cache["session_lp_current_raw"] = None
         cache["session_lp_gain"] = 0
         cache["session_lp_last_update"] = None
 
@@ -1370,9 +1424,11 @@ cache = {
     "session_start": None,  # When current session started (24h window)
     "session_wins": 0,     # Wins in current session
     "session_losses": 0,   # Losses in current session
-    "session_lp_start": None,  # LP at start of current session
-    "session_lp_last": None,   # Latest LP reading during session
-    "session_lp_gain": 0,      # Net LP gain since session start
+    "session_lp_start": None,       # Absolute LP at start of current session
+    "session_lp_start_raw": None,   # Raw LP at start of current session
+    "session_lp_last": None,        # Latest absolute LP reading during session
+    "session_lp_current_raw": None, # Latest raw LP reading during session
+    "session_lp_gain": 0,           # Net LP gain since session start
     "session_lp_last_update": None,
     "ranked_wins": 0,      # Total ranked wins (persistent)
     "ranked_losses": 0,    # Total ranked losses (persistent)
@@ -1855,9 +1911,9 @@ async def actualizar_datos(bot):
             ranked = get_rank(puuid) or []
             r = next((q for q in ranked if q["queueType"] == "RANKED_SOLO_5x5"), None)
             cache["rank"] = f"{r['tier']} {r['rank']} ({r['wins']}W/{r['losses']}L)" if r else "Sin rango"
-            current_lp = parse_solo_lp(ranked)
-            if current_lp is not None:
-                update_session_lp(current_lp)
+            current_lp, current_abs_lp = parse_solo_lp(ranked)
+            if current_abs_lp is not None:
+                update_session_lp(current_abs_lp, current_lp)
 
             matches = get_matches(puuid, 1) or []
             if not matches or not isinstance(matches, list):
@@ -1877,9 +1933,9 @@ async def actualizar_datos(bot):
                 if ranked:
                     old_rank = cache["rank"]
                     cache["rank"] = format_rank(ranked)
-                    current_lp = parse_solo_lp(ranked)
-                    if current_lp is not None:
-                        update_session_lp(current_lp)
+                    current_lp, current_abs_lp = parse_solo_lp(ranked)
+                    if current_abs_lp is not None:
+                        update_session_lp(current_abs_lp, current_lp)
                     cache["rank_last_update"] = datetime.now()
                     cache["api_status"] = "working"
                     cache["last_rank_check"] = now
@@ -2409,27 +2465,28 @@ class Bot(commands.Bot):
             return
 
         ranked = await asyncio.to_thread(get_rank, puuid) or []
-        current_lp = parse_solo_lp(ranked)
-        if current_lp is None:
+        current_lp, current_abs_lp = parse_solo_lp(ranked)
+        if current_lp is None or current_abs_lp is None:
             await ctx.send("❌ Could not determine current Solo Queue LP")
             return
 
         if cache.get("session_lp_start") is None:
-            update_session_lp(current_lp)
+            update_session_lp(current_abs_lp, current_lp)
 
-        session_lp_start = cache.get("session_lp_start")
+        session_lp_start_raw = cache.get("session_lp_start_raw")
         session_lp_gain = cache.get("session_lp_gain", 0)
-        session_wins = cache.get("session_wins", 0)
-        session_losses = cache.get("session_losses", 0)
+        today_stats = await asyncio.to_thread(get_today_stats, puuid)
+        session_wins = today_stats.get("wins", 0)
+        session_losses = today_stats.get("losses", 0)
         total_session_games = session_wins + session_losses
 
-        if total_session_games == 0 or session_lp_gain == 0:
+        if total_session_games == 0:
             await ctx.send("Todavía no hay partidas jugadas bro :/")
             return
 
         sign = "+" if session_lp_gain >= 0 else ""
         await ctx.send(
-            f"📈 Session LP: {sign}{session_lp_gain} LP | Start: {session_lp_start} LP | Current: {current_lp} LP | W/L: {session_wins}/{session_losses}"
+            f"📈 Session gain: {sign}{session_lp_gain} LP | Start: {session_lp_start_raw} LP | Current: {current_lp} LP | W/L: {session_wins}/{session_losses}"
         )
 
     @commands.command(aliases=["help"])
