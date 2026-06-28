@@ -2382,7 +2382,7 @@ class Bot(commands.Bot):
         else:
             await ctx.send("No last game data available")
 
-    @commands.command(aliases=["todaystats", "hoy", "sesion", "wl", "caquitas", "shit"])
+    @commands.command(aliases=["todaystats", "hoy", "sesion", "wl", "caquitas", "shit","caca","cora"])
     async def today(self, ctx):
         if not can_use(ctx.author.name, "today"): return
         
@@ -2402,7 +2402,7 @@ class Bot(commands.Bot):
         
         wr = int((wins / total) * 100) if total > 0 else 0
         invoked = ctx.message.content.strip().split()[0].lstrip("!").lower()
-        if invoked in {"shit", "caquitas", "wl"}:
+        if invoked in {"shit", "caquitas", "wl","caca","cora"}:
             visual_games = ["💜" if game == "W" else "💩" for game in stats.get("games", [])]
         else:
             visual_games = ["🟦" if game == "W" else "🟥" for game in stats.get("games", [])]
